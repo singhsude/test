@@ -1,0 +1,29 @@
+#! /bin/sh
+#	$NetBSD: buildmake.sh.in,v 1.8 2006/08/26 22:17:48 christos Exp $
+#
+# buildmake.sh.in - Autoconf-processed shell script for building make(1).
+#
+: ${TOOLDIR="C:/MinGW"}
+: ${HOST_CC="@CC@"}
+: ${HOST_CFLAGS="@CPPFLAGS@ @CFLAGS@"}
+: ${HOST_LDFLAGS="@LDFLAGS@ @LIBS@"}
+: ${runcmd=""}
+
+docmd () {
+	echo "$1"
+	$1 || exit 1
+}
+
+MKSRCDIR=@srcdir@/../../usr.bin/make
+MKLIBDIR=@srcdir@/../../lib
+MKEXEDIR=@srcdir@/../../libexec
+MKEXTDIR=@srcdir@/../../ext/lib
+MKETCDIR=@srcdir@/../../crypto/external/bsd/heimdal/dist/lib 
+MKMINDIR=@srcdir@/../../minix/lib
+
+for f in $MKEXTDIR/libc/sys/syscall.c $MKEXTDIR/libc/sys/vfork.c $MKEXTDIR/libc/sys/fork.c $MKEXTDIR/libc/sys/wait.c $MKEXTDIR/libc/sys/kill.c $MKSRCDIR/*.c $MKSRCDIR/lst.lib/*.c $MKEXTDIR/libc/sys/stat.c  $MKEXTDIR/libc/sys/opendir.c  $MKEXTDIR/libc/sys/readdir.c $MKEXTDIR/libc/sys/assert.c $MKEXTDIR/libc/sys/gettimeofday.c $MKEXTDIR/libc/sys/getprogname.c $MKEXTDIR/libc/sys/_errno.c $MKEXTDIR/libc/sys/errno.c $MKEXTDIR/libc/sys/fcntl.c $MKEXTDIR/libc/sys/killpg.c $MKEXTDIR/libc/sys/pipe.c $MKEXTDIR/libc/sys/sigaction.c $MKEXTDIR/libc/sys/sigprocmask.c $MKEXTDIR/libc/sys/poll.c $MKEXTDIR/libc/sys/utime.c $MKEXTDIR/libc/sys/syslog.c $MKEXTDIR/libc/sys/waitpid.c $MKEXTDIR/libc/sys/syslog.c $MKEXTDIR/libc/sys/getppid.c $MKEXTDIR/libc/sys/initdir.c $MKEXTDIR/libc/sys/getpagesize.c $MKEXTDIR/libc/sys/sysctl.c $MKEXTDIR/libc/sys/getdents.c $MKEXTDIR/libc/sys/alphasort.c $MKEXTDIR/libc/sys/merge.c $MKEXTDIR/libc/sys/telldir.c $MKEXTDIR/libc/sys/time.c $MKEXTDIR/libc/sys/regcomp.c $MKEXTDIR/libc/sys/regerror.c $MKEXTDIR/libc/sys/regexec.c $MKEXTDIR/libc/sys/reallocarr.c $MKEXTDIR/libc/sys/utime.c $MKEXTDIR/libc/sys/utimes.c $MKEXTDIR/libc/sys/time.c $MKEXTDIR/libc/sys/select.c $MKEXTDIR/libc/sys/strlcpy.c $MKEXTDIR/libc/sys/regfree.c $MKEXTDIR/libc/sys/sigreturn.c $MKEXTDIR/libc/sys/init.c $MKEXTDIR/libc/sys/readlink.c $MKEXTDIR/libc/sys/uname.c $MKEXTDIR/libc/sys/writev.c; do
+	docmd "${HOST_CC} ${HOST_CFLAGS} @DEFS@ -c $f"
+done
+
+docmd "${HOST_CC} ${HOST_CFLAGS} -o ${TOOLDIR}/bin/${_TOOL_PREFIX:-nb}make *.o ${HOST_LDFLAGS}"
+

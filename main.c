@@ -1,3 +1,128 @@
+/*	$NetBSD: strlcpy.c,v 1.3 2007/06/04 18:19:27 christos Exp $	*/
+/*	$OpenBSD: strlcpy.c,v 1.7 2003/04/12 21:56:39 millert Exp $	*/
+
+/*
+ * Copyright (c) 1998 Todd C. Miller <Todd.Miller@courtesan.com>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND TODD C. MILLER DISCLAIMS ALL
+ * WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL TODD C. MILLER BE LIABLE
+ * FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+ * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+#if !defined(_KERNEL) && !defined(_STANDALONE)
+#if HAVE_NBTOOL_CONFIG_H
+#include "nbtool_config.h"
+#endif
+
+#include <sys/cdefs.h>
+#if defined(LIBC_SCCS) && !defined(lint)
+__RCSID("$NetBSD: strlcpy.c,v 1.3 2007/06/04 18:19:27 christos Exp $");
+#endif /* LIBC_SCCS and not lint */
+
+#ifdef _LIBC
+#include "namespace.h"
+#endif
+#include <sys/types.h>
+#include <assert.h>
+#include <string.h>
+
+#ifdef _LIBC
+# ifdef __weak_alias
+__weak_alias(strlcpy, _strlcpy)
+# endif
+#endif
+#else
+#include <lib/libkern/libkern.h>
+#endif /* !_KERNEL && !_STANDALONE */
+
+
+#if !HAVE_STRLCPY
+/*
+ * Copy src to string dst of size siz.  At most siz-1 characters
+ * will be copied.  Always NUL terminates (unless siz == 0).
+ * Returns strlen(src); if retval >= siz, truncation occurred.
+ */
+size_t
+strlcpy(char *dst, const char *src, size_t siz)
+{
+	char *d = dst;
+	const char *s = src;
+	size_t n = siz;
+
+	_DIAGASSERT(dst != NULL);
+	_DIAGASSERT(src != NULL);
+
+	/* Copy as many bytes as will fit */
+	if (n != 0 && --n != 0) {
+		do {
+			if ((*d++ = *s++) == 0)
+				break;
+		} while (--n != 0);
+	}
+
+	/* Not enough room in dst, add NUL and traverse rest of src */
+	if (n == 0) {
+		if (siz != 0)
+			*d = '\0';		/* NUL-terminate dst */
+		while (*s++)
+			;
+	}
+
+	return(s - src - 1);	/* count does not include NUL */
+}
+#endif
+
+
+#include <sys/cdefs.h>
+#include <lib.h>
+#include "namespace.h"
+/*#include "extern.h"*/
+#include <string.h>
+
+/*
+ * The sysctl(2) system call, handled by the MIB service.
+ */
+int
+__sysctl(const int * name, unsigned int namelen, void * oldp, size_t * oldlenp,
+	const void * newp, size_t newlen)
+{
+	message m;
+	int r;
+
+	memset(&m, 0, sizeof(m));
+	m.m_lc_mib_sysctl.oldp = (vir_bytes)oldp;
+	m.m_lc_mib_sysctl.oldlen = (oldlenp != NULL) ? *oldlenp : 0;
+	m.m_lc_mib_sysctl.newp = (vir_bytes)newp;
+	m.m_lc_mib_sysctl.newlen = newlen;
+	m.m_lc_mib_sysctl.namelen = namelen;
+	m.m_lc_mib_sysctl.namep = (vir_bytes)name;
+	if (namelen <= CTL_SHORTNAME)
+		memcpy(m.m_lc_mib_sysctl.name, name, sizeof(*name) * namelen);
+
+	r = _syscall(MIB_PROC_NR, MIB_SYSCTL, &m);
+
+	/*
+	 * We copy the NetBSD behavior of replying with the old length also if
+	 * the call failed, typically with ENOMEM.  This is undocumented
+	 * behavior, but unfortunately relied on by sysctl(8) and other NetBSD
+	 * userland code.  If the call failed at the IPC level, the resulting
+	 * value will be garbage, but it should then not be used anyway.
+	 */
+	if (oldlenp != NULL)
+		*oldlenp = m.m_mib_lc_sysctl.oldlen;
+
+	return r;
+}
+
+
 /*	$NetBSD: main.c,v 1.233 2015/09/10 17:15:11 sjg Exp $	*/
 
 /*
@@ -112,6 +237,372 @@ __RCSID("$NetBSD: main.c,v 1.233 2015/09/10 17:15:11 sjg Exp $");
  *				errors which occurred, as passed to it, and
  *				exiting.
  */
+
+#include <sys/cdefs.h>
+#if defined(LIBC_SCCS) && !defined(lint)
+#if 0
+static char sccsid[] = "@(#)sysctl.c	8.2 (Berkeley) 1/4/94";
+#else
+__RCSID("$NetBSD: sysctl.c,v 1.35 2015/02/05 16:05:20 christos Exp $");
+#endif
+#endif /* LIBC_SCCS and not lint */
+
+#include "namespace.h"
+#include <sys/param.h>
+#define __COMPAT_SYSCTL
+#include <sys/sysctl.h>
+
+#include <assert.h>
+#include <errno.h>
+#include <paths.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+/*#include "extern.h"*/
+
+#ifdef __weak_alias
+__weak_alias(sysctl,_sysctl)
+#endif
+
+/*
+ * handles requests off the user subtree
+ */
+static int user_sysctl(const int *, u_int, void *, size_t *,
+			const void *, size_t);
+
+/*
+ * copies out individual nodes taking target version into account
+ */
+static size_t __cvt_node_out(uint, const struct sysctlnode *, void **,
+			     size_t *);
+
+#include <stdlib.h>
+
+int
+sysctl(const int *name, unsigned int namelen,
+	void *oldp, size_t *oldlenp,
+	const void *newp, size_t newlen)
+{
+	size_t oldlen, savelen;
+	int error;
+
+	if (name[0] != CTL_USER)
+		return (__sysctl(name, namelen, oldp, oldlenp,
+				 newp, newlen));
+
+	oldlen = (oldlenp == NULL) ? 0 : *oldlenp;
+	savelen = oldlen;
+	error = user_sysctl(name + 1, namelen - 1, oldp, &oldlen, newp, newlen);
+
+	if (error != 0) {
+		errno = error;
+		return (-1);
+	}
+
+	if (oldlenp != NULL) {
+		*oldlenp = oldlen;
+		if (oldp != NULL && oldlen > savelen) {
+			errno = ENOMEM;
+			return (-1);
+		}
+	}
+
+	return (0);
+}
+
+static int
+user_sysctl(const int *name, unsigned int namelen,
+	void *oldp, size_t *oldlenp,
+	const void *newp, size_t newlen)
+{
+#define _INT(s, n, v, d) {					\
+	.sysctl_flags = CTLFLAG_IMMEDIATE|CTLFLAG_PERMANENT|	\
+			CTLTYPE_INT|SYSCTL_VERSION,		\
+	.sysctl_size = sizeof(int),				\
+	.sysctl_name = (s),					\
+	.sysctl_num = (n),					\
+	.sysctl_un.scu_idata = (v),				\
+	.sysctl_desc = (d),					\
+	}
+
+	/*
+	 * the nodes under the "user" node
+	 */
+	static const struct sysctlnode sysctl_usermib[] = {
+#if defined(lint)
+		/*
+		 * lint doesn't like my initializers
+		 */
+		0
+#else /* !lint */
+		{
+			.sysctl_flags = SYSCTL_VERSION|CTLFLAG_PERMANENT|
+				CTLTYPE_STRING,
+			.sysctl_size = sizeof(_PATH_STDPATH),
+			.sysctl_name = "cs_path",
+			.sysctl_num = USER_CS_PATH,
+			.sysctl_data = __UNCONST(_PATH_STDPATH),
+			.sysctl_desc = __UNCONST(
+				"A value for the PATH environment variable "
+				"that finds all the standard utilities"),
+		},
+		_INT("bc_base_max", USER_BC_BASE_MAX, BC_BASE_MAX,
+		     "The maximum ibase/obase values in the bc(1) utility"),
+		_INT("bc_dim_max", USER_BC_DIM_MAX, BC_DIM_MAX,
+		     "The maximum array size in the bc(1) utility"),
+		_INT("bc_scale_max", USER_BC_SCALE_MAX, BC_SCALE_MAX,
+		     "The maximum scale value in the bc(1) utility"),
+		_INT("bc_string_max", USER_BC_STRING_MAX, BC_STRING_MAX,
+		     "The maximum string length in the bc(1) utility"),
+		_INT("coll_weights_max", USER_COLL_WEIGHTS_MAX,
+		     COLL_WEIGHTS_MAX, "The maximum number of weights that can "
+		     "be assigned to any entry of the LC_COLLATE order keyword "
+		     "in the locale definition file"),
+		_INT("expr_nest_max", USER_EXPR_NEST_MAX, EXPR_NEST_MAX,
+		     "The maximum number of expressions that can be nested "
+		     "within parenthesis by the expr(1) utility"),
+		_INT("line_max", USER_LINE_MAX, LINE_MAX, "The maximum length "
+		     "in bytes of a text-processing utility's input line"),
+		_INT("re_dup_max", USER_RE_DUP_MAX, RE_DUP_MAX, "The maximum "
+		     "number of repeated occurrences of a regular expression "
+		     "permitted when using interval notation"),
+		_INT("posix2_version", USER_POSIX2_VERSION, _POSIX2_VERSION,
+		     "The version of POSIX 1003.2 with which the system "
+		     "attempts to comply"),
+#ifdef _POSIX2_C_BIND
+		_INT("posix2_c_bind", USER_POSIX2_C_BIND, 1,
+		     "Whether the system's C-language development facilities "
+		     "support the C-Language Bindings Option"),
+#else
+		_INT("posix2_c_bind", USER_POSIX2_C_BIND, 0,
+		     "Whether the system's C-language development facilities "
+		     "support the C-Language Bindings Option"),
+#endif
+#ifdef POSIX2_C_DEV
+		_INT("posix2_c_dev", USER_POSIX2_C_DEV, 1,
+		     "Whether the system supports the C-Language Development "
+		     "Utilities Option"),
+#else
+		_INT("posix2_c_dev", USER_POSIX2_C_DEV, 0,
+		     "Whether the system supports the C-Language Development "
+		     "Utilities Option"),
+#endif
+#ifdef POSIX2_CHAR_TERM
+		_INT("posix2_char_term", USER_POSIX2_CHAR_TERM, 1,
+		     "Whether the system supports at least one terminal type "
+		     "capable of all operations described in POSIX 1003.2"),
+#else
+		_INT("posix2_char_term", USER_POSIX2_CHAR_TERM, 0,
+		     "Whether the system supports at least one terminal type "
+		     "capable of all operations described in POSIX 1003.2"),
+#endif
+#ifdef POSIX2_FORT_DEV
+		_INT("posix2_fort_dev", USER_POSIX2_FORT_DEV, 1,
+		     "Whether the system supports the FORTRAN Development "
+		     "Utilities Option"),
+#else
+		_INT("posix2_fort_dev", USER_POSIX2_FORT_DEV, 0,
+		     "Whether the system supports the FORTRAN Development "
+		     "Utilities Option"),
+#endif
+#ifdef POSIX2_FORT_RUN
+		_INT("posix2_fort_run", USER_POSIX2_FORT_RUN, 1,
+		     "Whether the system supports the FORTRAN Runtime "
+		     "Utilities Option"),
+#else
+		_INT("posix2_fort_run", USER_POSIX2_FORT_RUN, 0,
+		     "Whether the system supports the FORTRAN Runtime "
+		     "Utilities Option"),
+#endif
+#ifdef POSIX2_LOCALEDEF
+		_INT("posix2_localedef", USER_POSIX2_LOCALEDEF, 1,
+		     "Whether the system supports the creation of locales"),
+#else
+		_INT("posix2_localedef", USER_POSIX2_LOCALEDEF, 0,
+		     "Whether the system supports the creation of locales"),
+#endif
+#ifdef POSIX2_SW_DEV
+		_INT("posix2_sw_dev", USER_POSIX2_SW_DEV, 1,
+		     "Whether the system supports the Software Development "
+		     "Utilities Option"),
+#else
+		_INT("posix2_sw_dev", USER_POSIX2_SW_DEV, 0,
+		     "Whether the system supports the Software Development "
+		     "Utilities Option"),
+#endif
+#ifdef POSIX2_UPE
+		_INT("posix2_upe", USER_POSIX2_UPE, 1,
+		     "Whether the system supports the User Portability "
+		     "Utilities Option"),
+#else
+		_INT("posix2_upe", USER_POSIX2_UPE, 0,
+		     "Whether the system supports the User Portability "
+		     "Utilities Option"),
+#endif
+		_INT("stream_max", USER_STREAM_MAX, FOPEN_MAX,
+		     "The minimum maximum number of streams that a process "
+		     "may have open at any one time"),
+		_INT("tzname_max", USER_TZNAME_MAX, NAME_MAX,
+		     "The minimum maximum number of types supported for the "
+		     "name of a timezone"),
+		_INT("atexit_max", USER_ATEXIT_MAX, -1,
+		     "The maximum number of functions that may be registered "
+		     "with atexit(3)"),
+#endif /* !lint */
+	};
+#undef _INT
+
+	static const int clen = sizeof(sysctl_usermib) /
+		sizeof(sysctl_usermib[0]);
+
+	const struct sysctlnode *node;
+	int ni;
+	size_t l, sz;
+
+	/*
+	 * none of these nodes are writable and they're all terminal (for now)
+	 */
+	if (namelen != 1)
+		return (EINVAL);
+
+	l = *oldlenp;
+	if (name[0] == CTL_QUERY) {
+		uint v;
+		node = newp;
+		if (node == NULL)
+			return (EINVAL);
+		else if (SYSCTL_VERS(node->sysctl_flags) == SYSCTL_VERS_1 &&
+			 newlen == sizeof(struct sysctlnode))
+			v = SYSCTL_VERS_1;
+		else
+			return (EINVAL);
+
+		sz = 0;
+		for (ni = 0; ni < clen; ni++)
+			sz += __cvt_node_out(v, &sysctl_usermib[ni], &oldp, &l);
+		*oldlenp = sz;
+		return (0);
+	}
+
+	if (name[0] == CTL_DESCRIBE) {
+		/*
+		 * XXX make sure this is larger than the largest
+		 * "user" description
+		 */
+		char buf[192];
+		struct sysctldesc *d1 = (void *)&buf[0], *d2 = oldp;
+		size_t d;
+
+		node = newp;
+		if (node != NULL &&
+		    (SYSCTL_VERS(node->sysctl_flags) < SYSCTL_VERS_1 ||
+		     newlen != sizeof(struct sysctlnode)))
+			return (EINVAL);
+
+		sz = 0;
+		for (ni = 0; ni < clen; ni++) {
+			memset(&buf[0], 0, sizeof(buf));
+			if (node != NULL &&
+			    node->sysctl_num != sysctl_usermib[ni].sysctl_num)
+				continue;
+			d1->descr_num = sysctl_usermib[ni].sysctl_num;
+			d1->descr_ver = sysctl_usermib[ni].sysctl_ver;
+			if (sysctl_usermib[ni].sysctl_desc == NULL)
+				d1->descr_len = 1;
+			else {
+				size_t dlen;
+				(void)strlcpy(d1->descr_str,
+					sysctl_usermib[ni].sysctl_desc,
+					sizeof(buf) - sizeof(*d1));
+				dlen = strlen(d1->descr_str) + 1;
+				_DIAGASSERT(__type_fit(uint32_t, dlen));
+				d1->descr_len = (uint32_t)dlen;
+			}
+			d = (size_t)__sysc_desc_adv(NULL, d1->descr_len);
+			if (d2 != NULL)
+				memcpy(d2, d1, d);
+			sz += d;
+			d2 = (struct sysctldesc *)(void *)((char *)d2 + d);
+			if (node != NULL)
+				break;
+		}
+		*oldlenp = sz;
+		if (sz == 0 && node != NULL)
+			return (ENOENT);
+		return (0);
+
+	}
+
+	/*
+	 * none of these nodes are writable
+	 */
+	if (newp != NULL || newlen != 0)
+		return (EPERM);
+	
+	node = &sysctl_usermib[0];
+	for (ni = 0; ni	< clen; ni++)
+		if (name[0] == node[ni].sysctl_num)
+			break;
+	if (ni == clen)
+		return (EOPNOTSUPP);
+
+	node = &node[ni];
+	if (node->sysctl_flags & CTLFLAG_IMMEDIATE) {
+		switch (SYSCTL_TYPE(node->sysctl_flags)) {
+		case CTLTYPE_INT:
+			newp = &node->sysctl_idata;
+			break;
+		case CTLTYPE_QUAD:
+			newp = &node->sysctl_qdata;
+			break;
+		default:
+			return (EINVAL);
+		}
+	}
+	else
+		newp = node->sysctl_data;
+
+	l = MIN(l, node->sysctl_size);
+	if (oldp != NULL)
+		memcpy(oldp, newp, l);
+	*oldlenp = node->sysctl_size;
+
+	return (0);
+}
+
+static size_t
+__cvt_node_out(uint v, const struct sysctlnode *n, void **o, size_t *l)
+{
+	const void *src = n;
+	size_t sz;
+
+	switch (v) {
+#if (SYSCTL_VERSION != SYSCTL_VERS_1)
+#error __cvt_node_out: no support for SYSCTL_VERSION
+#endif /* (SYSCTL_VERSION != SYSCTL_VERS_1) */
+
+	case SYSCTL_VERSION:
+		sz = sizeof(struct sysctlnode);
+		break;
+
+	default:
+		sz = 0;
+		break;
+	}
+
+	if (sz > 0 && *o != NULL && *l >= sz) {
+		memcpy(*o, src, sz);
+		*o = sz + (caddr_t)*o;
+		*l -= sz;
+	}
+
+	return(sz);
+}
+
+
+
+
+
 
 #include <sys/types.h>
 #include <sys/time.h>
@@ -333,13 +824,14 @@ out:
 	return NULL;
 }
 
-
+/*
 int
 uname(struct utsname *name)
 {
 	return (0);
-}
-/*
+}*/
+
+
 #include "namespace.h"
 #include <sys/param.h>
 #include <sys/sysctl.h>
@@ -351,7 +843,7 @@ uname(struct utsname *name)
 #ifdef __weak_alias
 __weak_alias(uname,_uname)
 #endif
-*//*
+*/
 int
 uname(struct utsname *name)
 {
@@ -388,13 +880,13 @@ uname(struct utsname *name)
 			 * string is too long for {struct utsname}.version.
 			 * Just use the truncated string.
 			 * XXX: We could mark the truncation with "..."
-			 *//*
+			 */
 			name->version[sizeof(name->version) - 1] = '\0';
 		}
 		else goto error;
 	}
 
-	/* The version may have newlines in it, turn them into spaces. *//*
+	/* The version may have newlines in it, turn them into spaces. */
 	for (p = name->version; len--; ++p) {
 		if (*p == '\n' || *p == '\t') {
 			if (len > 1)
@@ -413,7 +905,7 @@ uname(struct utsname *name)
 
 error:
 	return (-1);
-}*/
+}
 
 
 #ifdef __weak_alias
